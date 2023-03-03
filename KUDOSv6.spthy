@@ -1,0 +1,136 @@
+theory kudos 
+begin
+
+builtins: hashing  // symmetric-encryption,  , asymmetric-encryption  , signing
+
+functions: check/3, prot/2 , true/0, g/4, f/2 // [private]
+// f(secret, nonces) -> KUDOS key generation (provided by the builtin 'hashing')
+// g(secret, salt, ID, label) -> OSCORE key derivation (Sender/Receiver key based on which ID is used)
+
+equations:
+	check(m, prot(m,k), k) = true
+// Integrity protection mechanism
+
+// Context($A, s, $Sender, $Receiver) means: agent $A knows the OSCORE Context with master secret s, with the following IDs:
+//	Sender ID -> $Sender ; Receiver ID -> $Receiver
+// Three important notes:
+// 1) This implies that Sender/Receiver IDs are public values that anyone can know (or at least, an adversary listening on the network)
+// 2) $A is a public value in the Tamarin model, used to identify the agent from the PoV of the solver. It does not represent anything concrete in the actual protocol/implementation. See also comment at the end of system_init.
+// 3) The fact that two nodes share a context with a common master_secret but reversed Sender/Receiver IDs is ensured by the system_init rule
+
+rule system_init:
+	[Fr(~master_secret)]  // 
+	--[TraceContext($A, ~master_secret, $X, $Y), TraceContext($B, ~master_secret, $Y, $X)]->
+	[!Context($A, ~master_secret, $X, $Y), !Context($B, ~master_secret, $Y, $X)]    // Alternative version: replace $A by $X and $B by $Y
+
+rule initiator_start:
+	let
+	initiator_sender_key = g(f(s, ~n1), ~n1, $I_s, 'Key')
+	m1 = <$I_s, ~n1, prot(<~n1, $I_s>, initiator_sender_key)>
+	in
+	[!Context($I, s, $I_s, $I_r), Fr(~n1)]
+	--[ R1(s, $I_s, $I_r, ~n1) ]->  // Add "Neq($I_s, $I_r)" if we want to model that KUDOS explicitly forbid updating a context where the same node acts as both Sender and Receiver
+	[Out(m1), I1(~n1)]
+
+
+rule responder_reply:
+	let
+	temp_responder_recipient_key = g(f(s, n1), n1, $R_r, 'Key')
+	m1 = <$R_r, n1, prot(<n1, $R_r>, temp_responder_recipient_key)>
+	new_master_secret = f(s, <n1, ~n2>)
+	responder_sender_key = g(new_master_secret, <n1, ~n2>, $R_s, 'Key')
+	responder_recipient_key = g(new_master_secret, <n1, ~n2>, $R_r, 'Key')
+	common_iv = g(new_master_secret, <n1, ~n2>, 'emptybytestring', 'IV')
+	m2 = <~n2, prot(<~n2, $R_r>, responder_sender_key)>
+	in
+	[In(m1), !Context($R, s, $R_s, $R_r), Fr(~n2)]
+	--[ R2(s, $R_s, $R_r, n1, ~n2), Secret(new_master_secret), Secret(responder_sender_key), Secret(responder_recipient_key), Secret(common_iv), Running($R_s, $R_r, <new_master_secret, responder_sender_key, responder_recipient_key, common_iv>) ]->
+	[Out(m2)]
+
+rule initiator_finish:
+	let
+	m2 = <n2, protection>
+	new_master_secret = f(s, <n1, n2>)
+	initiator_recipient_key = g(new_master_secret, <n1, n2>, $I_r, 'Key')
+	initiator_sender_key = g(new_master_secret, <n1, n2>, $I_s, 'Key')
+	common_iv = g(new_master_secret, <n1, n2>, 'emptybytestring', 'IV')
+	in
+	[I1(n1), In(m2), !Context($I, s, $I_s, $I_r)]
+	--[ R3(s, $I_s, $I_r, n1, n2), Eq(check(<n2, $I_s>, protection, initiator_recipient_key),true), Secret(new_master_secret), Secret(initiator_sender_key), Secret(initiator_recipient_key), Secret(common_iv), Commit($I_s,$I_r, <new_master_secret, initiator_recipient_key, initiator_sender_key, common_iv>) ]->
+	[]
+
+
+// DONE: include salt in the model?
+// DONE: include integrity protection of the sender_ID of the sender of the request
+
+
+restriction Equality:
+"All x y #i. Eq(x,y) @i ==> x = y"
+/*
+restriction Inequality:
+"All x #i. Neq(x,x) @ #i ==> F"
+*/
+
+/* sanity check lemmas */
+
+/*
+
+*/
+lemma L1:
+	exists-trace
+	" Ex s I_s I_r n1 #i.
+		R1(s, I_s, I_r, n1) @ #i
+	"
+
+lemma L2:
+	exists-trace
+	" Ex s R_s R_r n1 n2 #i.
+		R2(s, R_s, R_r, n1, n2) @ #i
+	"
+lemma L3:
+	exists-trace
+	" Ex s I_s I_r n1 n2 #i.
+		R3(s, I_s, I_r, n1, n2) @ #i
+	"
+lemma L3plus:
+	exists-trace
+	" Ex s I_s I_r n1 n2 #i. (
+		R3(s, I_s, I_r, n1, n2) @ #i &
+		not I_s = I_r
+		)
+	"
+lemma L3minus:
+	exists-trace
+	" Ex s I_s I_r n1 n2 #i. (
+		R3(s, I_s, I_r, n1, n2) @ #i &
+		I_s = I_r
+		)
+	"
+
+/* checking model validity  */
+
+lemma proper_contexts:
+	" All s A A_s A_r B B_s B_r #i #j. (
+		TraceContext(A, s, A_s, A_r) @ i &
+		TraceContext(B, s, B_s, B_r) @ j
+		) ==> (
+		A_s = B_r &
+		A_r = B_s
+		)
+	"
+/* security property */
+
+lemma new_master_secret_and_key_material_truly_secret:
+	"All s #i. Secret(s)@i ==> not Ex #j. K(s) @ j"
+
+// converge to the same key
+lemma noninjective_agreement:
+"
+	All I R t #i.
+		Commit(I,R,t) @i
+		==> (Ex #j. Running(R,I,t) @j)
+"
+// DONE: include convergence of the new salt
+
+
+end
