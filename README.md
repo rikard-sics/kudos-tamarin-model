@@ -1,2 +1,2 @@
 # kudos-tamarin-model
-Model of KUDOS procedure for the Tamarin Prover
+Model of KUDOS procedure for the Tamarin Prover.
